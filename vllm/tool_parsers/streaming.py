@@ -106,12 +106,13 @@ def extract_required_tool_call_streaming(
     current_text: str | None,
     delta_text: str,
     function_name_returned: bool,
+    current_tool_array_index: int = -1,
     tool_call_idx: int | None,
     tool_call_id_type: str,
-) -> tuple[DeltaMessage | None, bool]:
+) -> tuple[DeltaMessage | None, bool, int]:
     if current_text is None or current_text == "":
         # if the current text is empty, we cannot parse it
-        return None, function_name_returned
+        return None, function_name_returned, current_tool_array_index
     try:
         flags = Allow.ALL
         obj, _ = partial_json_loads(current_text, flags)
@@ -131,6 +132,15 @@ def extract_required_tool_call_streaming(
         _, finishes_previous_tool = filter_delta_text(delta_text, previous_text)
         # take the last tool call from the generated list
         current_tool_call = obj[-1]
+
+        # Reset header state when a new tool call appears in the array.
+        # Without this, the single function_name_returned boolean stays True
+        # after the first tool's header is sent, causing subsequent tool calls
+        # to skip their own name/id header.
+        active_idx = len(obj) - 1
+        if active_idx > current_tool_array_index:
+            function_name_returned = False
+            current_tool_array_index = active_idx
 
         # once parameters have been generated the name is complete as well
         if not finishes_previous_tool and (
@@ -192,4 +202,4 @@ def extract_required_tool_call_streaming(
                 else:
                     delta_message = None
 
-    return delta_message, function_name_returned
+    return delta_message, function_name_returned, current_tool_array_index
