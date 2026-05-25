@@ -62,7 +62,7 @@ class StreamState:
     # only used for "required" and "named tool" choices,
     # tracks whether function name has been fully returned in the stream yet
     function_name_returned: bool = False
-
+    current_tool_array_index: int = -1
 
 class Parser:
     """
@@ -585,8 +585,9 @@ class DelegatingParser(Parser):
         # tracked in StreamState for streaming parsing.
         tool_call_idx: int | None = None,
         tool_call_id_type: str = "random",
-        function_name_returned: bool = False,
-    ) -> tuple[DeltaMessage | None, bool]:
+      function_name_returned: bool = False,
+    current_tool_array_index: int = -1,
+) -> tuple[DeltaMessage | None, bool, int]:
         assert self._tool_parser is not None
         supports_required_and_named = self._tool_parser.supports_required_and_named
         if (
@@ -605,7 +606,7 @@ class DelegatingParser(Parser):
                 tool_call_id_type=tool_call_id_type,
                 tokenizer=self.model_tokenizer,
             )
-            return delta_message, function_name_returned
+          return delta_message, function_name_returned, current_tool_array_index
 
         if supports_required_and_named and request.tool_choice == "required":
             delta_message, function_name_returned = (
@@ -614,11 +615,12 @@ class DelegatingParser(Parser):
                     current_text=current_text,
                     delta_text=delta_text,
                     function_name_returned=function_name_returned,
+                    current_tool_array_index=current_tool_array_index,
                     tool_call_idx=tool_call_idx,
                     tool_call_id_type=tool_call_id_type,
                 )
             )
-            return delta_message, function_name_returned
+          return delta_message, function_name_returned, current_tool_array_index
         return self.extract_tool_calls_streaming(
             previous_text,
             current_text,
@@ -709,7 +711,11 @@ class DelegatingParser(Parser):
             # A boundary delta may carry both reasoning and tool call,
             # save it before the tool parser overwrites delta_message.
             reasoning = delta_message.reasoning if delta_message else None
-            delta_message, state.function_name_returned = (
+           (
+                delta_message,
+                state.function_name_returned,
+                state.current_tool_array_index,
+            ) = (
                 self._extract_tool_calls_streaming(
                     previous_text=state.previous_text,
                     current_text=current_text,
@@ -721,6 +727,7 @@ class DelegatingParser(Parser):
                     tool_call_idx=state.history_tool_call_cnt,
                     tool_call_id_type=state.tool_call_id_type,
                     function_name_returned=state.function_name_returned,
+                    current_tool_array_index=state.current_tool_array_index,
                 )
             )
             if reasoning:
