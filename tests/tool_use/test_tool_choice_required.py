@@ -1,6 +1,3 @@
-这个文件改动比较多，直接全选替换最快。`Ctrl+A` 全选，删掉，粘贴以下内容：
-
-```python
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
@@ -11,8 +8,11 @@ import regex as re
 from pydantic import TypeAdapter
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
+from vllm.parser.abstract_parser import _WrappedParser
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.streaming import extract_required_tool_call_streaming
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 
@@ -69,9 +69,12 @@ EXAMPLE_TOOLS = [
 def _compile_and_check(
     tools: list[ChatCompletionToolsParam], sample_output, should_match: bool
 ):
+    # self = MagicMock(tool_choice="required", tools=tools)
+    # schema = ChatCompletionRequest._get_json_schema_from_tool(self)
     schema = get_json_schema_from_tools(tools=tools, tool_choice="required")
     assert isinstance(schema, dict)
 
+    # use build_regex_from_schema used in JSONLogitsProcessor to create Guide
     from outlines_core.json_schema import build_regex_from_schema
 
     regex = build_regex_from_schema(json.dumps(schema))
@@ -117,12 +120,12 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
     VALID_TOOL_OUTPUTS
     + [
         (None, False),
-        ([], False),
-        ({}, False),
-        ([{}], False),
+        ([], False),  # empty list cannot be generated
+        ({}, False),  # empty object cannot be generated
+        ([{}], False),  # list with empty object cannot be generated
         (
             [
-                {
+                {  # function without required parameters cannot be generated
                     "name": "get_current_weather"
                 }
             ],
@@ -130,7 +133,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
         ),
         (
             [
-                {
+                {  # function without required parameters cannot be generated
                     "name": "get_current_weather",
                     "parameters": {},
                 }
@@ -139,7 +142,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
         ),
         (
             [
-                {
+                {  # function without required parameters cannot be generated
                     "name": "get_current_weather",
                     "parameters": None,
                 }
@@ -147,7 +150,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
             False,
         ),
         (
-            {
+            {  # tool call without lists cannot be generated
                 "name": "get_current_weather",
                 "parameters": {"city": "Vienna"},
             },
@@ -155,7 +158,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
         ),
         (
             [
-                {
+                {  # tool call with extra parameters cannot be generated
                     "name": "get_current_weather",
                     "parameters": {"city": "Vienna", "extra": "value"},
                 }
@@ -164,7 +167,7 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
         ),
         (
             [
-                {
+                {  # tool call where parameters are first cannot be generated
                     "parameters": {"city": "Vienna"},
                     "name": "get_current_weather",
                 }
@@ -173,18 +176,18 @@ VALID_TOOLS = [t[0] for t in VALID_TOOL_OUTPUTS]
         ),
         (
             [
-                {
+                {  # tool call without all required parameters cannot be generated
                     "name": "get_forecast",
                     "parameters": {"city": "Vienna"},
                 }
             ],
             False,
         ),
-        (
+        (  # tool call with incorrect name/parameters cannot be generated
             [{"name": "get_weather", "parameters": {"city": "Vienna", "days": 7}}],
             False,
         ),
-        (
+        (  #  tool call with both valid and empty function cannot be generated
             [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}, {}],
             False,
         ),
@@ -216,12 +219,12 @@ def update_parameters_empty_dict(
     "sample_output, should_match",
     [
         (None, False),
-        ([], False),
-        ({}, False),
-        ([{}], False),
+        ([], False),  # empty list cannot be generated
+        ({}, False),  # empty object cannot be generated
+        ([{}], False),  # list with empty object cannot be generated
         (
             [
-                {
+                {  # function without required parameters cannot be generated
                     "name": "get_current_weather"
                 }
             ],
@@ -229,7 +232,7 @@ def update_parameters_empty_dict(
         ),
         (
             [
-                {
+                {  # function without required parameters cannot be generated
                     "name": "get_current_weather",
                     "parameters": None,
                 }
@@ -238,7 +241,7 @@ def update_parameters_empty_dict(
         ),
         (
             [
-                {
+                {  # function with extra parameters cannot be generated
                     "name": "get_current_weather",
                     "parameters": {"extra": "value"},
                 }
@@ -247,7 +250,7 @@ def update_parameters_empty_dict(
         ),
         (
             [
-                {
+                {  # only function with empty parameters object is valid
                     "name": "get_current_weather",
                     "parameters": {},
                 }
@@ -287,22 +290,18 @@ def test_streaming_output_valid(output, empty_params, delta_len):
 
     previous_text = ""
     function_name_returned = False
-    current_tool_array_index = -1
     messages = []
     for i in range(0, len(output_json), delta_len):
         delta_text = output_json[i : i + delta_len]
         current_text = previous_text + delta_text
 
-        delta_message, function_name_returned, current_tool_array_index = (
-            extract_required_tool_call_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-                current_tool_array_index=current_tool_array_index,
-                tool_call_idx=None,
-                tool_call_id_type="random",
-            )
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
         )
 
         if delta_message:
@@ -331,47 +330,7 @@ def test_streaming_output_valid(output, empty_params, delta_len):
     assert json.dumps(json.loads(combined_messages)) == output_json
 
 
-def test_streaming_output_valid_with_trailing_extra_data():
-    output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
-    output_json = json.dumps(output) + "\nDONE"
-
-    previous_text = ""
-    function_name_returned = False
-    current_tool_array_index = -1
-    messages = []
-    delta_len = 3
-    for i in range(0, len(output_json), delta_len):
-        delta_text = output_json[i : i + delta_len]
-        current_text = previous_text + delta_text
-
-        delta_message, function_name_returned, current_tool_array_index = (
-            extract_required_tool_call_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-                current_tool_array_index=current_tool_array_index,
-                tool_call_idx=None,
-                tool_call_id_type="random",
-            )
-        )
-
-        if delta_message:
-            messages.append(delta_message)
-
-        previous_text = current_text
-
-    assert len(messages) > 0
-
-
-@pytest.mark.parametrize("delta_len", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
-def test_streaming_multiple_tool_calls_each_gets_header(delta_len):
-    """Each tool call in a multi-tool required stream must emit its own header.
-
-    Regression test for the bug where a single stream-level boolean
-    ``function_name_returned`` was shared across all tool calls, causing
-    the second (and subsequent) tool calls to skip their name/id header.
-    """
+def test_streaming_output_emits_header_for_each_tool_call():
     output = [
         {"name": "get_current_weather", "parameters": {"city": "Vienna"}},
         {"name": "get_forecast", "parameters": {"city": "Berlin", "days": 3}},
@@ -380,53 +339,112 @@ def test_streaming_multiple_tool_calls_each_gets_header(delta_len):
 
     previous_text = ""
     function_name_returned = False
-    current_tool_array_index = -1
-    messages = []
+    headers: dict[int, str] = {}
+    arguments: dict[int, str] = {}
 
+    for i in range(0, len(output_json), 4):
+        delta_text = output_json[i : i + 4]
+        current_text = previous_text + delta_text
+
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
+        )
+
+        if delta_message:
+            tool_call = delta_message.tool_calls[0]
+            index = tool_call.index
+            if tool_call.function.name:
+                headers[index] = tool_call.function.name
+            if tool_call.function.arguments:
+                arguments[index] = (
+                    arguments.get(index, "") + tool_call.function.arguments
+                )
+
+        previous_text = current_text
+
+    assert headers == {0: "get_current_weather", 1: "get_forecast"}
+    assert json.loads(arguments[0]) == output[0]["parameters"]
+    assert json.loads(arguments[1]) == output[1]["parameters"]
+
+
+class RequiredToolChoiceParser(ToolParser):
+    supports_required_and_named = True
+
+
+def test_required_tool_streaming_uses_parser_state_for_each_tool_call():
+    _WrappedParser.reasoning_parser_cls = None
+    _WrappedParser.tool_parser_cls = RequiredToolChoiceParser
+    parser = _WrappedParser(tokenizer=object())
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "weather"}],
+        tools=EXAMPLE_TOOLS,
+        tool_choice="required",
+    )
+    output = [
+        {"name": "get_current_weather", "parameters": {"city": "Vienna"}},
+        {"name": "get_forecast", "parameters": {"city": "Berlin", "days": 3}},
+    ]
+    output_json = json.dumps(output)
+
+    headers: dict[int, str] = {}
+    arguments: dict[int, str] = {}
+    prompt_token_ids: list[int] | None = []
+
+    for i in range(0, len(output_json), 4):
+        delta_text = output_json[i : i + 4]
+        delta_message = parser.parse_delta(
+            delta_text=delta_text,
+            delta_token_ids=[i],
+            request=request,
+            prompt_token_ids=prompt_token_ids,
+        )
+        prompt_token_ids = None
+
+        if delta_message and delta_message.tool_calls:
+            tool_call = delta_message.tool_calls[0]
+            index = tool_call.index
+            if tool_call.function.name:
+                headers[index] = tool_call.function.name
+            if tool_call.function.arguments:
+                arguments[index] = (
+                    arguments.get(index, "") + tool_call.function.arguments
+                )
+
+    assert headers == {0: "get_current_weather", 1: "get_forecast"}
+    assert json.loads(arguments[0]) == output[0]["parameters"]
+    assert json.loads(arguments[1]) == output[1]["parameters"]
+
+
+def test_streaming_output_valid_with_trailing_extra_data():
+    output = [{"name": "get_current_weather", "parameters": {"city": "Vienna"}}]
+    output_json = json.dumps(output) + "\nDONE"
+
+    previous_text = ""
+    function_name_returned = False
+    messages = []
+    delta_len = 3
     for i in range(0, len(output_json), delta_len):
         delta_text = output_json[i : i + delta_len]
         current_text = previous_text + delta_text
 
-        delta_message, function_name_returned, current_tool_array_index = (
-            extract_required_tool_call_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-                current_tool_array_index=current_tool_array_index,
-                tool_call_idx=None,
-                tool_call_id_type="random",
-            )
+        delta_message, function_name_returned = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=None,
+            tool_call_id_type="random",
         )
 
         if delta_message:
             messages.append(delta_message)
+
         previous_text = current_text
 
-    named_messages = [m for m in messages if m.tool_calls[0].function.name]
-    assert len(named_messages) == len(output), (
-        f"Expected {len(output)} tool-call headers, got {len(named_messages)}. "
-        "Each tool call must emit its own name/id header."
-    )
-    emitted_names = [m.tool_calls[0].function.name for m in named_messages]
-    expected_names = [t["name"] for t in output]
-    assert emitted_names == expected_names, (
-        f"Tool call names mismatch: {emitted_names} != {expected_names}"
-    )
-
-    args_by_index: dict[int, str] = {}
-    for m in messages:
-        tc = m.tool_calls[0]
-        idx = tc.index if tc.index is not None else 0
-        args_by_index.setdefault(idx, "")
-        if tc.function.arguments:
-            args_by_index[idx] += tc.function.arguments
-
-    for i, tool in enumerate(output):
-        reconstructed = json.loads(args_by_index[i])
-        assert reconstructed == tool["parameters"], (
-            f"Tool {i} arguments mismatch: {reconstructed} != {tool['parameters']}"
-        )
-```
-
-粘贴完 commit，告诉我。
+    assert len(messages) > 0

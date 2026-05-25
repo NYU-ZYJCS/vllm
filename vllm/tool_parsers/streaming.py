@@ -59,6 +59,34 @@ def filter_delta_text(
     return updated_delta, passed_zero
 
 
+def _load_partial_tool_array(text: str) -> list | None:
+    if not text:
+        return None
+    try:
+        obj, _ = partial_json_loads(text, Allow.ALL)
+    except (
+        partial_json_parser.core.exceptions.MalformedJSON,
+        json.JSONDecodeError,
+    ):
+        return None
+
+    if not isinstance(obj, list) or not obj:
+        return None
+    return obj
+
+
+def _target_required_tool_index(obj: list) -> int:
+    idx = len(obj) - 1
+    current_tool_call = obj[idx]
+    if (
+        idx > 0
+        and isinstance(current_tool_call, dict)
+        and "parameters" not in current_tool_call
+    ):
+        return idx - 1
+    return idx
+
+
 def extract_named_tool_call_streaming(
     *,
     delta_text: str,
@@ -106,45 +134,36 @@ def extract_required_tool_call_streaming(
     current_text: str | None,
     delta_text: str,
     function_name_returned: bool,
-    current_tool_array_index: int = -1,
     tool_call_idx: int | None,
     tool_call_id_type: str,
-) -> tuple[DeltaMessage | None, bool, int]:
+) -> tuple[DeltaMessage | None, bool]:
     if current_text is None or current_text == "":
         # if the current text is empty, we cannot parse it
-        return None, function_name_returned, current_tool_array_index
-    try:
-        flags = Allow.ALL
-        obj, _ = partial_json_loads(current_text, flags)
-    except (
-        partial_json_parser.core.exceptions.MalformedJSON,
-        json.JSONDecodeError,
-    ):
-        obj = None
+        return None, function_name_returned
+    obj = _load_partial_tool_array(current_text)
 
     # check if the current text is a valid array
     # containing a partial tool calling object
     # if not repeat
-    if obj is None or not isinstance(obj, list) or not len(obj) > 0:
+    if obj is None:
         function_name_returned = False
         delta_message = None
     else:
         _, finishes_previous_tool = filter_delta_text(delta_text, previous_text)
-        # take the last tool call from the generated list
-        current_tool_call = obj[-1]
-
-        # Reset header state when a new tool call appears in the array.
-        # Without this, the single function_name_returned boolean stays True
-        # after the first tool's header is sent, causing subsequent tool calls
-        # to skip their own name/id header.
-        active_idx = len(obj) - 1
-        if active_idx > current_tool_array_index:
+        target_index = _target_required_tool_index(obj)
+        current_tool_call = obj[target_index]
+        previous_obj = _load_partial_tool_array(previous_text)
+        if previous_obj is not None and target_index != _target_required_tool_index(
+            previous_obj
+        ):
             function_name_returned = False
-            current_tool_array_index = active_idx
 
         # once parameters have been generated the name is complete as well
-        if not finishes_previous_tool and (
-            "name" not in current_tool_call or "parameters" not in current_tool_call
+        if not isinstance(current_tool_call, dict) or (
+            not finishes_previous_tool
+            and (
+                "name" not in current_tool_call or "parameters" not in current_tool_call
+            )
         ):
             function_name_returned = False
             delta_message = None
@@ -156,12 +175,6 @@ def extract_required_tool_call_streaming(
                 )
                 arguments = param_match.group(1) if param_match else ""
                 arguments, _ = filter_delta_text(arguments, previous_text)
-
-                # if this iteration finishes a previous tool call but a
-                # new incomplete tool is already generated, take the
-                # previous from the list
-                if finishes_previous_tool and "parameters" not in current_tool_call:
-                    current_tool_call = obj[-2]
 
                 function_name_returned = True
                 tool_call_id = make_tool_call_id(
@@ -176,7 +189,7 @@ def extract_required_tool_call_streaming(
                             function=DeltaFunctionCall(
                                 name=current_tool_call["name"], arguments=arguments
                             ),
-                            index=len(obj) - 1,
+                            index=target_index,
                             type="function",
                         )
                     ]
@@ -195,11 +208,11 @@ def extract_required_tool_call_streaming(
                                     name=None,
                                     arguments=delta_text,
                                 ),
-                                index=len(obj) - 1,
+                                index=target_index,
                             )
                         ]
                     )
                 else:
                     delta_message = None
 
-    return delta_message, function_name_returned, current_tool_array_index
+    return delta_message, function_name_returned
